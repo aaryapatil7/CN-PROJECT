@@ -1,0 +1,13 @@
+# Decentralized Multi-Threaded P2P File-Sharing System
+# Built using Python 3 Standard Library (Python >= 3.8)
+#
+# Standard library modules used:
+# - socket      (UDP socket programming)
+# - threading   (Multi-threaded downloading and timer loops)
+# - struct      (Custom 18-byte binary packet header encoding)
+# - zlib        (CRC-32 packet checksum validation)
+# - hashlib     (SHA-256 cryptographic file integrity verification)
+# - json        (P2P control messages, manifests, discovery beacons)
+# - time, os, sys, math, random, argparse, queue, unittest
+#
+# No external third-party dependencies are required to run this project.
