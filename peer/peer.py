@@ -46,6 +46,7 @@ class PeerNode:
         loss_prob: float = DEFAULT_LOSS_PROB,
         corruption_prob: float = DEFAULT_CORRUPTION_PROB,
         log_callback: Optional[Callable[[str], None]] = None,
+        known_peer_ips: Optional[List[str]] = None,
     ):
         self.peer_id = peer_id
         self.host = host
@@ -55,6 +56,7 @@ class PeerNode:
         self.loss_prob = loss_prob
         self.corruption_prob = corruption_prob
         self.log_callback = log_callback or (lambda msg: None)
+        self.known_peer_ips = known_peer_ips
 
         # Network Statistics Tracker
         self.stats = NetworkStats()
@@ -66,6 +68,10 @@ class PeerNode:
         # Main UDP socket for all P2P file transfers and signaling
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        except OSError:
+            pass
         if os.name == "nt" and hasattr(socket, "SIO_UDP_CONNRESET"):
             try:
                 self.sock.ioctl(socket.SIO_UDP_CONNRESET, False)
@@ -101,6 +107,7 @@ class PeerNode:
             get_shared_files_fn=self.chunk_manager.list_shared_files,
             sock=self.sock,
             log_callback=self.log_callback,
+            known_peer_ips=self.known_peer_ips,
         )
 
         self.stop_event = threading.Event()
@@ -270,15 +277,9 @@ class PeerNode:
         # 1. Discover peers with this file
         source_peers = self.discovery.find_peers_with_file(file_name)
         if not source_peers:
-            # Trigger immediate local scan beacon pulse
-            disc_pkt = Packet.create_discovery(self.peer_id, self.port, self.chunk_manager.list_shared_files())
-            for p in range(5001, 5011):
-                if p != self.port:
-                    try:
-                        self.sock.sendto(disc_pkt.encode(), ("127.0.0.1", p))
-                    except Exception:
-                        pass
-            time.sleep(0.8)
+            # Trigger immediate multi-device discovery pulse
+            self.discovery.send_discovery_pulse()
+            time.sleep(1.0)
             source_peers = self.discovery.find_peers_with_file(file_name)
 
         if not source_peers:

@@ -6,6 +6,35 @@ chunking settings, timeouts, and simulation controls.
 """
 
 import os
+import socket
+
+
+def get_local_ip() -> str:
+    """Detect local LAN IPv4 address of this machine."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        # Connecting to a LAN IP doesn't actually send packets but selects outgoing interface
+        s.connect(("10.255.255.255", 1))
+        ip = s.getsockname()[0]
+    except Exception:
+        try:
+            ip = socket.gethostbyname(socket.gethostname())
+        except Exception:
+            ip = "127.0.0.1"
+    finally:
+        s.close()
+    return ip
+
+
+def get_broadcast_addresses() -> list:
+    """Return standard and subnet-directed broadcast addresses."""
+    addrs = ["<broadcast>", "255.255.255.255"]
+    local_ip = get_local_ip()
+    if "." in local_ip and local_ip != "127.0.0.1":
+        prefix = local_ip.rsplit(".", 1)[0]
+        addrs.append(f"{prefix}.255")
+    return list(dict.fromkeys(addrs))
+
 
 # --- Protocol & Transport Parameters ---
 MAGIC_COOKIE = 0x5032       # 2-byte magic identifier ('P2')
@@ -29,14 +58,28 @@ DEFAULT_CHUNK_SIZE = 64 * 1024  # 64 KB per file chunk
 MAX_CONCURRENT_DOWNLOAD_THREADS = 4
 
 # --- Network & Discovery Defaults ---
-DEFAULT_HOST = "127.0.0.1"
+DEFAULT_HOST = "0.0.0.0"    # Bind to 0.0.0.0 to listen on all interfaces (LAN & loopback)
 DEFAULT_PORT = 5001
-DISCOVERY_BROADCAST_PORT = 5050
+DISCOVERY_BROADCAST_PORT = 5001
 DISCOVERY_INTERVAL = 1.5    # Peer announcement beacon interval (seconds)
 PEER_TIMEOUT = 60.0         # Seconds without beacon before marking peer as inactive (1 min)
 
-# Local seed scan range for multi-peer runs on the same machine without broadcast permissions
-LOCAL_SCAN_PORTS = [5001, 5002, 5003, 5004, 5005, 5006, 5007, 5008, 5009, 5010]
+# Default known peer IP addresses for multi-computer deployment
+KNOWN_PEER_IPS = [
+    "10.30.164.22",
+    "10.30.164.23",
+    "10.30.164.24",
+]
+
+# Mapping from IP address to default Peer ID
+PEER_IP_MAP = {
+    "10.30.164.22": "PEER_A",
+    "10.30.164.23": "PEER_B",
+    "10.30.164.24": "PEER_C",
+}
+
+# Candidate ports to scan for discovery on each IP
+LOCAL_SCAN_PORTS = [5001, 5002, 5003, 5004, 5005]
 
 # --- Simulation Defaults ---
 DEFAULT_LOSS_PROB = 0.0       # Simulated packet loss probability (0.0 to 1.0)

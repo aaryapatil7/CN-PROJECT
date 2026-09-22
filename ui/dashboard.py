@@ -11,6 +11,7 @@ import time
 from typing import Dict, List, Any
 
 from .logger import Colors
+from config import get_local_ip
 
 
 class Dashboard:
@@ -26,11 +27,13 @@ class Dashboard:
     @staticmethod
     def print_banner(peer_id: str, host: str, port: int, window_size: int, loss_prob: float) -> None:
         """Display stylish top banner with peer identity and configuration."""
+        local_ip = get_local_ip()
+        endpoint_display = f"{local_ip}:{port} (listening on {host}:{port})" if host in ("0.0.0.0", "") else f"{host}:{port}"
         print(f"\n{Colors.CYAN}==============================================================={Colors.RESET}")
         print(f"{Colors.BOLD}{Colors.WHITE}        DECENTRALIZED P2P FILE-SHARING SYSTEM (SR-UDP)        {Colors.RESET}")
         print(f"{Colors.CYAN}==============================================================={Colors.RESET}")
         print(f"  {Colors.BOLD}Peer ID    :{Colors.RESET} {Colors.GREEN}{peer_id}{Colors.RESET}")
-        print(f"  {Colors.BOLD}Endpoint   :{Colors.RESET} {host}:{port}")
+        print(f"  {Colors.BOLD}Endpoint   :{Colors.RESET} {endpoint_display}")
         print(f"  {Colors.BOLD}Transport  :{Colors.RESET} Custom Selective Repeat Sliding Window over UDP")
         print(f"  {Colors.BOLD}Window Size:{Colors.RESET} {window_size} packets | {Colors.BOLD}Packet Loss:{Colors.RESET} {loss_prob * 100:.1f}%")
         print(f"{Colors.CYAN}---------------------------------------------------------------{Colors.RESET}")

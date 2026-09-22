@@ -286,46 +286,73 @@ cd "c:\Users\Aarya Patil\OneDrive\Desktop\CN PROJECT"
 
 ## 9. Step-by-Step 3-Peer Demonstration Guide
 
-This scenario demonstrates 3 independent peers running on one machine (or across a local area network):
-- **Peer A (Port 5001)**: Shares `movie.mp4` (1.5 MB) and `notes.pdf` (512 KB).
-- **Peer C (Port 5003)**: Shares `movie.mp4` (1.5 MB).
-- **Peer B (Port 5002)**: Downloader with **20% simulated packet loss**. Downloads `movie.mp4` concurrently from Peer A and Peer C!
+This system supports both **3 separate physical computers on the same LAN** and **single-computer testing**.
 
-### Step 1: Prepare Demo Files
-Run the demo setup script:
-```powershell
-python demo_setup.py
-```
-This automatically generates `movie.mp4`, `notes.pdf`, and `image.jpg` inside separate folders for Peer A, B, and C.
+### Configuration for 3 Physical Computers:
+- **Computer 1 (`10.30.164.22`)**: **Peer A** (Seeder — shares `movie.mp4` and `notes.pdf`)
+- **Computer 2 (`10.30.164.23`)**: **Peer B** (Downloader — downloads `movie.mp4` concurrently from Peer A and Peer C)
+- **Computer 3 (`10.30.164.24`)**: **Peer C** (Seeder — shares `movie.mp4`)
+
+> [!TIP]
+> **Windows Firewall Note:** If Windows Firewall prompts on first run, click **Allow**. Alternatively, if peers cannot see each other on Windows, run this in an Administrator PowerShell on each computer to allow UDP traffic on ports 5001-5010:
+> ```powershell
+> netsh advfirewall firewall add rule name="CN_P2P" dir=in action=allow protocol=UDP localport=5001-5010
+> ```
 
 ---
 
-### Step 2: Launch the 3 Peer Nodes in Separate Terminals
+### Step 1: Clone and Prepare Files on All 3 Computers
 
-#### Terminal 1 — Launch Peer A (Seeder 1)
+On each computer, clone the repository and run:
 ```powershell
-python main.py --peer-id PEER_A --port 5001 --shared-dir shared_files/peer_a --downloads-dir downloads/peer_a --loss 0.10
+python demo_setup.py
 ```
+This prepares `shared_files/peer_a`, `shared_files/peer_b`, and `shared_files/peer_c`.
 
-#### Terminal 2 — Launch Peer C (Seeder 2)
-```powershell
-python main.py --peer-id PEER_C --port 5003 --shared-dir shared_files/peer_c --downloads-dir downloads/peer_c --loss 0.10
-```
+---
 
-#### Terminal 3 — Launch Peer B (Downloader)
+### Step 2: Start the Peer Nodes
+
+#### On Computer 1 (`10.30.164.22`) — Peer A (Seeder):
 ```powershell
-python main.py --peer-id PEER_B --port 5002 --shared-dir shared_files/peer_b --downloads-dir downloads/peer_b --loss 0.20
+python main.py --peer-id PEER_A --port 5001 --loss 0.10
 ```
+*(Or simply `python main.py` — it auto-detects its IP `10.30.164.22` as `PEER_A`!)*
+
+#### On Computer 3 (`10.30.164.24`) — Peer C (Seeder):
+```powershell
+python main.py --peer-id PEER_C --port 5001 --loss 0.10
+```
+*(Or simply `python main.py` — it auto-detects its IP `10.30.164.24` as `PEER_C`!)*
+
+#### On Computer 2 (`10.30.164.23`) — Peer B (Downloader):
+```powershell
+python main.py --peer-id PEER_B --port 5001 --loss 0.10
+```
+*(Or simply `python main.py` — it auto-detects its IP `10.30.164.23` as `PEER_B`!)*
 
 ---
 
 ### Step 3: Trigger Multi-Peer Download in Peer B
-1. In **Terminal 3 (Peer B)**, choose option `[1]` to list network peers. You will see `PEER_A (127.0.0.1:5001)` and `PEER_C (127.0.0.1:5003)` along with `movie.mp4`.
-2. Choose option `[2]` (Download File).
-3. Enter `movie.mp4`.
+
+1. On **Computer 2 (Peer B)**, select option `[1]` to list network peers. You will see:
+   - `PEER_A (10.30.164.22:5001) -> movie.mp4, notes.pdf`
+   - `PEER_C (10.30.164.24:5001) -> movie.mp4`
+2. Select option `[2]` (Download File).
+3. Type `movie.mp4` and press Enter.
+
+---
+
+### Single-Computer Localhost Demo (Alternative):
+Open 3 separate terminals on one computer:
+- **Terminal 1:** `python main.py --peer-id PEER_A --port 5001`
+- **Terminal 2:** `python main.py --peer-id PEER_C --port 5003`
+- **Terminal 3:** `python main.py --peer-id PEER_B --port 5002 --loss 0.10`
+
+---
 
 ### What You Will Observe During the Live Demonstration:
-1. **Multi-Threading**: Peer B spawns worker threads requesting chunks simultaneously from Peer A (`5001`) and Peer C (`5003`).
+1. **Multi-Threading**: Peer B spawns concurrent worker threads requesting chunks simultaneously from Peer A (`10.30.164.22:5001`) and Peer C (`10.30.164.24:5001`).
 2. **Packet Loss Simulation**: Console logs show `[LOSS] Simulated loss of DATA Seq=X`.
 3. **Out-of-Order Buffering**: Packets arriving after the lost packet display `[BUFFER] Stored out-of-order Seq=Y`.
 4. **Selective Retransmission**: Upon timer expiration, `[TIMEOUT] Seq=X` fires, followed by `[RETRANSMIT] Sent DATA Seq=X`. **Only packet X is resent**, not Y!

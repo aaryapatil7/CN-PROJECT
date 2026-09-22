@@ -21,8 +21,11 @@ from config import (
     DEFAULT_WINDOW_SIZE,
     DEFAULT_TIMEOUT,
     DEFAULT_LOSS_PROB,
+    KNOWN_PEER_IPS,
+    PEER_IP_MAP,
     SHARED_DIR,
     DOWNLOADS_DIR,
+    get_local_ip,
 )
 
 
@@ -30,9 +33,10 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Decentralized Multi-Threaded P2P File-Sharing System (Selective Repeat over UDP)"
     )
-    parser.add_argument("--peer-id", type=str, default="", help="Unique identifier for this peer (e.g. PEER_A)")
+    parser.add_argument("--peer-id", type=str, default="", help="Unique identifier for this peer (e.g. PEER_A, PEER_B, PEER_C)")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"UDP port to bind (default: {DEFAULT_PORT})")
     parser.add_argument("--host", type=str, default=DEFAULT_HOST, help=f"Host IP to bind (default: {DEFAULT_HOST})")
+    parser.add_argument("--peers", type=str, default="", help="Comma-separated peer IP addresses (e.g. 10.30.164.22,10.30.164.23,10.30.164.24)")
     parser.add_argument("--shared-dir", type=str, default="", help="Directory containing locally shared files")
     parser.add_argument("--downloads-dir", type=str, default="", help="Directory for saved downloads")
     parser.add_argument("--window-size", type=int, default=DEFAULT_WINDOW_SIZE, help=f"Sliding window size (default: {DEFAULT_WINDOW_SIZE})")
@@ -158,12 +162,17 @@ def interactive_cli(peer: PeerNode):
 def main():
     args = parse_args()
 
-    peer_id = args.peer_id or f"PEER_{args.port}"
+    local_ip = get_local_ip()
+    auto_peer_id = PEER_IP_MAP.get(local_ip, "")
+
+    peer_id = args.peer_id or auto_peer_id or f"PEER_{args.port}"
     shared_dir = args.shared_dir or os.path.join(SHARED_DIR, peer_id.lower())
     downloads_dir = args.downloads_dir or os.path.join(DOWNLOADS_DIR, peer_id.lower())
 
     os.makedirs(shared_dir, exist_ok=True)
     os.makedirs(downloads_dir, exist_ok=True)
+
+    known_peer_ips = [ip.strip() for ip in args.peers.split(",") if ip.strip()] if args.peers else list(KNOWN_PEER_IPS)
 
     peer = PeerNode(
         peer_id=peer_id,
@@ -175,6 +184,7 @@ def main():
         timeout=args.timeout,
         loss_prob=args.loss,
         log_callback=log_event,
+        known_peer_ips=known_peer_ips,
     )
 
     peer.start()

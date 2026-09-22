@@ -46,6 +46,45 @@ PKT_DISC = 0x06
 PKT_FIN = 0x07
 PKT_ERR = 0x08
 
+# Default known peer IP addresses for multi-computer deployment
+KNOWN_PEER_IPS = [
+    "10.30.164.22",
+    "10.30.164.23",
+    "10.30.164.24",
+]
+
+PEER_IP_MAP = {
+    "10.30.164.22": "PEER_A",
+    "10.30.164.23": "PEER_B",
+    "10.30.164.24": "PEER_C",
+}
+
+
+def get_local_ip() -> str:
+    """Detect local LAN IPv4 address of this machine."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("10.255.255.255", 1))
+        ip = s.getsockname()[0]
+    except Exception:
+        try:
+            ip = socket.gethostbyname(socket.gethostname())
+        except Exception:
+            ip = "127.0.0.1"
+    finally:
+        s.close()
+    return ip
+
+
+def get_broadcast_addresses() -> list:
+    """Return standard and subnet-directed broadcast addresses."""
+    addrs = ["<broadcast>", "255.255.255.255"]
+    local_ip = get_local_ip()
+    if "." in local_ip and local_ip != "127.0.0.1":
+        prefix = local_ip.rsplit(".", 1)[0]
+        addrs.append(f"{prefix}.255")
+    return list(dict.fromkeys(addrs))
+
 
 # --------------------------------------------------------------------------------------
 # 2. CUSTOM APPLICATION-LAYER PACKET (BINARY HEADER + CRC-32)
@@ -261,19 +300,26 @@ class SRReceiver:
 # --------------------------------------------------------------------------------------
 class SimplePeer:
     """Core Peer Node combining Selective Repeat UDP transport and multi-peer downloading."""
-    def __init__(self, peer_id: str, port: int, shared_dir: str, downloads_dir: str, loss_prob: float = 0.0):
+    def __init__(self, peer_id: str, port: int, shared_dir: str, downloads_dir: str, loss_prob: float = 0.0, known_peer_ips: Optional[List[str]] = None):
         self.peer_id = peer_id
-        self.host = "127.0.0.1"
+        self.host = "0.0.0.0"
         self.port = port
         self.shared_dir = shared_dir
         self.downloads_dir = downloads_dir
         self.loss_prob = loss_prob
+        self.known_peer_ips = list(known_peer_ips) if known_peer_ips is not None else list(KNOWN_PEER_IPS)
+        self.candidate_ports = [5001, 5002, 5003, 5004, 5005]
+        self.local_ip = get_local_ip()
 
         os.makedirs(self.shared_dir, exist_ok=True)
         os.makedirs(self.downloads_dir, exist_ok=True)
 
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        except OSError:
+            pass
         if os.name == "nt" and hasattr(socket, "SIO_UDP_CONNRESET"):
             try:
                 self.sock.ioctl(socket.SIO_UDP_CONNRESET, False)
@@ -297,19 +343,43 @@ class SimplePeer:
         return [f for f in os.listdir(self.shared_dir) if os.path.isfile(os.path.join(self.shared_dir, f))]
 
     def _beacon_loop(self):
-        """Broadcast periodic discovery announcements to find other peers on local ports."""
+        """Broadcast periodic discovery announcements to find other peers across LAN and local ports."""
         while self.running:
             disc = Packet(PKT_DISC, payload=json.dumps({
                 "peer_id": self.peer_id, "port": self.port, "files": self.list_shared_files()
             }).encode("utf-8"))
             raw = disc.encode()
-            for p in range(5001, 5006):
-                if p != self.port:
+
+            # 1. Ping configured known peer IPs across candidate ports (LAN seeds)
+            target_ips = set(self.known_peer_ips)
+            target_ips.add("127.0.0.1")
+            for target_ip in target_ips:
+                for target_port in self.candidate_ports:
+                    if (target_ip in ("127.0.0.1", "localhost", self.local_ip)) and target_port == self.port:
+                        continue
                     try:
-                        self.sock.sendto(raw, (self.host, p))
+                        self.sock.sendto(raw, (target_ip, target_port))
                     except OSError:
                         pass
-            time.sleep(2.0)
+
+            # 2. Ping known peers in table
+            with self.lock:
+                known_endpoints = [(p["ip"], p["port"]) for p in self.peers.values()]
+            for ip, pport in known_endpoints:
+                try:
+                    self.sock.sendto(raw, (ip, pport))
+                except OSError:
+                    pass
+
+            # 3. Broadcast to subnet and global broadcast
+            for b_ip in get_broadcast_addresses():
+                for target_port in self.candidate_ports:
+                    try:
+                        self.sock.sendto(raw, (b_ip, target_port))
+                    except OSError:
+                        pass
+
+            time.sleep(1.5)
 
     def _recv_loop(self):
         """Main UDP socket listener."""
@@ -331,7 +401,16 @@ class SimplePeer:
                 info = json.loads(pkt.payload.decode("utf-8"))
                 pid = info["peer_id"]
                 if pid != self.peer_id:
+                    is_new = pid not in self.peers
                     self.peers[pid] = {"ip": src[0], "port": info["port"], "files": info["files"], "last_seen": time.time()}
+                    if is_new:
+                        try:
+                            reply_pkt = Packet(PKT_DISC, payload=json.dumps({
+                                "peer_id": self.peer_id, "port": self.port, "files": self.list_shared_files()
+                            }).encode("utf-8"))
+                            self.sock.sendto(reply_pkt.encode(), (src[0], info["port"]))
+                        except Exception:
+                            pass
 
             # 2. Metadata Request (Peer wants file details)
             elif pkt.pkt_type == PKT_META_REQ:
@@ -386,13 +465,19 @@ class SimplePeer:
 
     def download_file(self, file_name: str) -> bool:
         """Download file concurrently from multiple peers holding it."""
+        seeders = [info for pid, info in self.peers.items() if file_name in info.get("files", [])]
         if not seeders:
-            # Send immediate discovery ping to local ports
+            # Send immediate discovery ping to LAN seeds and candidate ports
             disc = Packet(PKT_DISC, payload=json.dumps({"peer_id": self.peer_id, "port": self.port, "files": self.list_shared_files()}).encode("utf-8"))
-            for p in range(5001, 5006):
-                if p != self.port:
+            raw = disc.encode()
+            target_ips = set(self.known_peer_ips)
+            target_ips.add("127.0.0.1")
+            for target_ip in target_ips:
+                for p in self.candidate_ports:
+                    if (target_ip in ("127.0.0.1", "localhost", self.local_ip)) and p == self.port:
+                        continue
                     try:
-                        self.sock.sendto(disc.encode(), (self.host, p))
+                        self.sock.sendto(raw, (target_ip, p))
                     except OSError:
                         pass
             time.sleep(0.8)
@@ -514,20 +599,26 @@ class SimplePeer:
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="Simple P2P File Sharing (Selective Repeat over UDP)")
-    parser.add_argument("--peer-id", type=str, default="PEER_A", help="Peer ID (e.g. PEER_A, PEER_B)")
+    parser.add_argument("--peer-id", type=str, default="", help="Peer ID (e.g. PEER_A, PEER_B, PEER_C)")
     parser.add_argument("--port", type=int, default=5001, help="UDP port (e.g. 5001, 5002, 5003)")
+    parser.add_argument("--peers", type=str, default="", help="Comma-separated peer IPs (e.g. 10.30.164.22,10.30.164.23,10.30.164.24)")
     parser.add_argument("--loss", type=float, default=0.0, help="Packet loss probability (0.0 to 0.5)")
     args = parser.parse_args()
 
-    shared = os.path.join("shared_files", args.peer_id.lower())
-    down = os.path.join("downloads", args.peer_id.lower())
+    local_ip = get_local_ip()
+    auto_peer_id = PEER_IP_MAP.get(local_ip, "")
+    peer_id = args.peer_id or auto_peer_id or f"PEER_{args.port}"
+    known_peer_ips = [ip.strip() for ip in args.peers.split(",") if ip.strip()] if args.peers else list(KNOWN_PEER_IPS)
 
-    peer = SimplePeer(args.peer_id, args.port, shared, down, loss_prob=args.loss)
+    shared = os.path.join("shared_files", peer_id.lower())
+    down = os.path.join("downloads", peer_id.lower())
+
+    peer = SimplePeer(peer_id, args.port, shared, down, loss_prob=args.loss, known_peer_ips=known_peer_ips)
 
     while True:
         try:
             print(f"\n\033[96m===============================================================")
-            print(f"  P2P FILE SHARING - {args.peer_id} (Port {args.port}) | Loss: {peer.loss_prob*100:.0f}%")
+            print(f"  P2P FILE SHARING - {peer_id} | LAN IP: {local_ip}:{args.port} | Loss: {peer.loss_prob*100:.0f}%")
             print(f"===============================================================\033[0m")
             print("  [1] List Active Peers & Discovered Files")
             print("  [2] Download a File from Peers (Multi-Threaded)")

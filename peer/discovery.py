@@ -12,16 +12,19 @@ from typing import Dict, List, Tuple, Any, Optional
 
 from protocol.packet import Packet, PacketType
 from config import (
-    DISCOVERY_BROADCAST_PORT,
     DISCOVERY_INTERVAL,
     PEER_TIMEOUT,
     LOCAL_SCAN_PORTS,
+    KNOWN_PEER_IPS,
+    get_local_ip,
+    get_broadcast_addresses,
 )
 
 
 class PeerDiscovery:
     """
     Decentralized discovery engine using UDP beacons and peer table synchronization.
+    Supports multi-device LAN discovery via direct seed pings, broadcast, and instant handshakes.
     """
 
     def __init__(
@@ -32,6 +35,8 @@ class PeerDiscovery:
         get_shared_files_fn,
         sock: Optional[socket.socket] = None,
         log_callback: Optional[Any] = None,
+        known_peer_ips: Optional[List[str]] = None,
+        candidate_ports: Optional[List[int]] = None,
     ):
         self.peer_id = peer_id
         self.host = host
@@ -40,12 +45,16 @@ class PeerDiscovery:
         self.get_shared_files_fn = get_shared_files_fn
         self.log_callback = log_callback or (lambda msg: None)
 
+        self.known_peer_ips = list(known_peer_ips) if known_peer_ips is not None else list(KNOWN_PEER_IPS)
+        self.candidate_ports = list(candidate_ports) if candidate_ports is not None else list(LOCAL_SCAN_PORTS)
+        self.local_ip = get_local_ip()
+
         # Peer Table: peer_id -> {"ip": str, "port": int, "shared_files": list, "last_seen": float}
         self.peers: Dict[str, Dict[str, Any]] = {}
         self.lock = threading.Lock()
         self.stop_event = threading.Event()
 
-        # Dedicated discovery socket with broadcast enabled
+        # Dedicated discovery socket with broadcast enabled (fallback if sock not provided)
         self.discovery_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.discovery_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         if hasattr(socket, "SIO_UDP_CONNRESET"):
@@ -57,6 +66,12 @@ class PeerDiscovery:
             self.discovery_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         except OSError:
             pass
+
+        if self.sock:
+            try:
+                self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            except OSError:
+                pass
 
     def start(self) -> None:
         """Start discovery beacon thread and listener."""
@@ -88,6 +103,44 @@ class PeerDiscovery:
             }
             if is_new:
                 self.log_callback(f"[DISCOVERY] Discovered new peer: {peer_id} at {ip}:{port} (Files: {shared_files})")
+                # Immediate handshake reply so the newly discovered peer registers us instantly
+                try:
+                    reply_pkt = Packet.create_discovery(self.peer_id, self.port, self.get_shared_files_fn())
+                    s = self.sock or self.discovery_sock
+                    s.sendto(reply_pkt.encode(), (ip, port))
+                except Exception:
+                    pass
+
+    def send_discovery_pulse(self) -> None:
+        """Immediately dispatch discovery beacons to all seeds, known peers, and broadcast."""
+        shared_files = self.get_shared_files_fn()
+        disc_pkt = Packet.create_discovery(
+            peer_id=self.peer_id,
+            port=self.port,
+            shared_files=shared_files,
+        )
+        raw = disc_pkt.encode()
+        s = self.sock or self.discovery_sock
+
+        # Unicast to seeds & localhost
+        target_ips = set(self.known_peer_ips)
+        target_ips.add("127.0.0.1")
+        for target_ip in target_ips:
+            for target_port in self.candidate_ports:
+                if (target_ip in ("127.0.0.1", "localhost", self.local_ip)) and target_port == self.port:
+                    continue
+                try:
+                    s.sendto(raw, (target_ip, target_port))
+                except OSError:
+                    pass
+
+        # Broadcast addresses
+        for b_ip in get_broadcast_addresses():
+            for target_port in self.candidate_ports:
+                try:
+                    s.sendto(raw, (b_ip, target_port))
+                except OSError:
+                    pass
 
     def _beacon_loop(self) -> None:
         """Periodically broadcast discovery announcements to find other peers."""
@@ -101,11 +154,16 @@ class PeerDiscovery:
             raw = disc_pkt.encode()
             s = self.sock or self.discovery_sock
 
-            # 1. Send directly to local candidate ports for robust local multi-peer testing
-            for target_port in LOCAL_SCAN_PORTS:
-                if target_port != self.port:
+            # 1. Send directly to configured known peer IPs across candidate ports (LAN seeds)
+            target_ips = set(self.known_peer_ips)
+            target_ips.add("127.0.0.1")  # Always include loopback for local tests
+
+            for target_ip in target_ips:
+                for target_port in self.candidate_ports:
+                    if (target_ip in ("127.0.0.1", "localhost", self.local_ip)) and target_port == self.port:
+                        continue
                     try:
-                        s.sendto(raw, ("127.0.0.1", target_port))
+                        s.sendto(raw, (target_ip, target_port))
                     except OSError:
                         pass
 
@@ -118,11 +176,13 @@ class PeerDiscovery:
                 except OSError:
                     pass
 
-            # 3. Send broadcast beacon
-            try:
-                self.discovery_sock.sendto(raw, ("<broadcast>", DISCOVERY_BROADCAST_PORT))
-            except OSError:
-                pass
+            # 3. Send broadcast beacon to standard & subnet broadcast addresses
+            for b_ip in get_broadcast_addresses():
+                for target_port in self.candidate_ports:
+                    try:
+                        s.sendto(raw, (b_ip, target_port))
+                    except OSError:
+                        pass
 
             self.stop_event.wait(DISCOVERY_INTERVAL)
 
