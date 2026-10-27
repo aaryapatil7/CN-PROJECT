@@ -1,6 +1,5 @@
 # Decentralized Multi-threaded P2P File Sharing
 
-A beginner-friendly Computer Networks project with **3 peers**, **TCP file transfer**, and **UDP + custom Selective Repeat Sliding Window**.
 
 ## Main features
 
